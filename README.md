@@ -1,5 +1,5 @@
-# 🕶️ Augmented Reality with ArUco Markers
-======================================
+# Augmented Reality with ArUco Markers
+--------------------------------------
 
 This project implements an Augmented Reality system using OpenCV and ArUco markers.
 It allows detecting markers, estimating their pose, and rendering shaded 3D objects
@@ -25,7 +25,7 @@ augmented_reality/
 ```
 
 --------------------------------------
-# 🚀 Installation
+# Installation
 --------------------------------------
 ```bash
 git clone https://github.com/your-username/augmented_reality.git
@@ -34,9 +34,9 @@ pip install -r requirements.txt
 ```
 
 --------------------------------------
-# ▶️ Usage
+# Usage
 --------------------------------------
-## 1️⃣ Calibrate the camera
+## Calibrate the camera
    Use chessboard images inside database/calibration_images/ to compute intrinsic parameters.
    The calibration result will be saved in database/camera_parameters/calibration_data.npz.
 
@@ -44,14 +44,14 @@ pip install -r requirements.txt
    python -m scripts.calibration_pipeline
 ```
 
-## 2️⃣ Process sample images
+## Process sample images
    Apply marker detection and render 3D objects on images.
 
 ```bash
    python -m scripts.images_pipeline
 ```
 
-## 3️⃣ Process a video
+## Process a video
    Apply marker detection and render 3D objects on video frames.
 
 ```bash
@@ -59,7 +59,7 @@ pip install -r requirements.txt
 ```
 
 --------------------------------------
-# 📸 Example Output
+# Example Output
 --------------------------------------
 Results are saved under processed_output/:
 - Images → processed_output/images/
