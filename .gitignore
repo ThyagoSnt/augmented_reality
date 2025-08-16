@@ -1,0 +1,5 @@
+# Folders
+processed_output/
+
+# Files
+*.npz
