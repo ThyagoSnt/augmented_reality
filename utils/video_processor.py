@@ -1,8 +1,18 @@
 import cv2
+import os
 from tqdm import tqdm
 
 class VideoProcessor:
-    def __init__(self, input_path, output_path, ar_system):
+    def __init__(self, input_path, output_dir, ar_system):
+        self.input_path = input_path
+        self.output_dir = output_dir
+        self.ar_system = ar_system
+
+        os.makedirs(output_dir, exist_ok=True)
+
+        base_name = os.path.basename(input_path)
+        output_path = os.path.join(output_dir, f"processed_{base_name}")
+
         self.cap = cv2.VideoCapture(input_path)
         fourcc = cv2.VideoWriter_fourcc(*"mp4v")
         self.out = cv2.VideoWriter(
@@ -10,7 +20,6 @@ class VideoProcessor:
             (int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
              int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT)))
         )
-        self.ar_system = ar_system
 
     def run(self):
         total_frames = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))

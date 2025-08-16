@@ -2,3 +2,11 @@ calibration:
   chessboard_size: [10, 7]
   square_size: 0.025
   marker_length: 0.05
+
+paths:
+  calibration_images: "./database/calibration_images/*.png"
+  aruco_images: "./database/aruco_images"
+  aruco_video: "./database/aruco_videos/video.mp4"
+  parameters: "./database/camera_parameters/calibration_data.npz"
+  processed_images: "./processed_output/images"
+  processed_videos: "./processed_output/videos"
