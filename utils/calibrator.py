@@ -68,8 +68,6 @@ class CameraCalibrator:
         self.tvecs = tvecs
         return ret
 
-    import numpy as np
-
     def l2_norm_manual(self, points1, points2):
         """
         Implements the L2 norm (Euclidean norm) manually, equivalent to cv2.norm(..., cv2.NORM_L2).
@@ -105,13 +103,71 @@ class CameraCalibrator:
 
         # Final L2 norm: √(Σ ||p_i - p̂_i||²)
         return np.sqrt(total)
+    
+
+    def project_points(self, object_points, rvec, tvec, camera_matrix, dist_coeffs):
+        """
+        Manual implementation of cv2.projectPoints.
+        Based on Hartley & Zisserman (Multiple View Geometry, 2nd Ed.),
+        Chapter 6: Camera Calibration, Section 6.3.1 (pp. 312–314).
+
+        Args:
+            object_points: (N, 3) array of 3D object points in world coordinates.
+            rvec: (3, 1) Rodrigues rotation vector.
+            tvec: (3, 1) translation vector.
+            camera_matrix: (3, 3) intrinsic matrix.
+            dist_coeffs: (k1, k2, p1, p2, k3) distortion coefficients.
+
+        Returns:
+            image_points: (N, 1, 2) array of projected 2D image points.
+        """
+
+        # Convert rvec to rotation matrix using Rodrigues formula
+        theta = np.linalg.norm(rvec)
+        if theta < 1e-14:
+            R = np.eye(3)
+        else:
+            r = rvec.flatten() / theta
+            K = np.array([
+                [0, -r[2], r[1]],
+                [r[2], 0, -r[0]],
+                [-r[1], r[0], 0]
+            ])
+            R = np.eye(3) + np.sin(theta) * K + (1 - np.cos(theta)) * (K @ K)
+
+        # Transform 3D points to camera coordinates
+        object_points = np.asarray(object_points).reshape(-1, 3).T  # (3, N)
+        X_cam = (R @ object_points) + tvec.reshape(3, 1)  # (3, N)
+
+        # Normalize (divide by z) -> pinhole projection
+        x = X_cam[0, :] / X_cam[2, :]
+        y = X_cam[1, :] / X_cam[2, :]
+
+        # Radial distortion
+        r2 = x**2 + y**2
+        k1, k2, p1, p2, k3 = dist_coeffs.flatten()
+        radial = 1 + k1*r2 + k2*r2**2 + k3*r2**3
+
+        # Tangential distortion
+        x_dist = x*radial + 2*p1*x*y + p2*(r2 + 2*x**2)
+        y_dist = y*radial + p1*(r2 + 2*y**2) + 2*p2*x*y
+
+        # Apply intrinsics
+        fx, fy = camera_matrix[0, 0], camera_matrix[1, 1]
+        cx, cy = camera_matrix[0, 2], camera_matrix[1, 2]
+        u = fx * x_dist + cx
+        v = fy * y_dist + cy
+
+        # Return in OpenCV shape (N,1,2)
+        image_points = np.stack([u, v], axis=1).reshape(-1, 1, 2)
+        return image_points, None
 
 
     def compute_reprojection_error(self):
         """Compute the mean reprojection error across all calibration images."""
         total_error = 0
         for i in range(len(self.objpoints)):
-            imgpoints2, _ = cv2.projectPoints(
+            imgpoints2, _ = self.project_points(
                 self.objpoints[i], self.rvecs[i], self.tvecs[i],
                 self.camera_matrix, self.dist_coeffs
             )
