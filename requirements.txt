@@ -1,4 +1,5 @@
-python-opencv
+opencv-python
 numpy
 tqdm
 pyyaml
+scipy

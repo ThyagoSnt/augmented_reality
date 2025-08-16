@@ -33,9 +33,7 @@ class ARMarker(CameraMathUtils):
 
         img_points = corners.reshape(-1, 2)
 
-        success, rvec, tvec = cv2.solvePnP(
-            obj_points, img_points, self.camera_matrix, self.dist_coeffs
-        )
+        rvec, tvec = self.solve_pnp(obj_points, img_points, self.camera_matrix)
         return rvec, tvec
 
     def draw_shaded_cuboid(self, frame, rvec, tvec, height_scale=1.0):
