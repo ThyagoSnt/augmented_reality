@@ -1,7 +1,9 @@
 import cv2
 import numpy as np
 
-class ARMarker:
+from utils.camera_math import CameraMathUtils
+
+class ARMarker(CameraMathUtils):
     def __init__(self, camera_params_path, marker_length):
         # Load camera intrinsic parameters
         data = np.load(camera_params_path)
@@ -14,41 +16,6 @@ class ARMarker:
         self.parameters = cv2.aruco.DetectorParameters()
         self.detector = cv2.aruco.ArucoDetector(self.aruco_dict, self.parameters)
 
-    def rodrigues(self, rvec):
-        """
-        Manual implementation of Rodrigues' rotation formula.
-        Converts a 3D rotation vector into a 3x3 rotation matrix.
-
-        Returns:
-            R (np.ndarray): 3x3 rotation matrix
-            jacobian (None): Placeholder to match OpenCV's interface
-            rvec (np.ndarray): The original rotation vector (for compatibility)
-        """
-        rvec = rvec.flatten().astype(float)
-        theta = np.linalg.norm(rvec)
-
-        if theta < 1e-12:
-            # For very small angles, return identity
-            R = np.eye(3)
-        else:
-            # Normalized rotation axis
-            k = rvec / theta
-            kx, ky, kz = k
-
-            # Skew-symmetric cross-product matrix of k
-            K = np.array([
-                [0, -kz, ky],
-                [kz, 0, -kx],
-                [-ky, kx, 0]
-            ])
-
-            I = np.eye(3)
-            R = I * np.cos(theta) + (1 - np.cos(theta)) * np.outer(k, k) + np.sin(theta) * K
-
-        # Jacobian is not implemented (not needed for rendering)
-        jacobian = None
-
-        return R, jacobian, rvec
 
     def detect_markers(self, gray_frame):
         """Detect ArUco markers in a grayscale frame."""
@@ -83,7 +50,7 @@ class ARMarker:
         ])
 
         # Project 3D -> 2D
-        points_2d, _ = cv2.projectPoints(points_3d, rvec, tvec,
+        points_2d, _ = self.project_points(points_3d, rvec, tvec,
                                          self.camera_matrix, self.dist_coeffs)
         points_2d = np.int32(points_2d).reshape(-1, 2)
 
