@@ -1,7 +1,7 @@
 calibration:
   chessboard_size: [10, 7]
   square_size: 0.025
-  marker_length: 0.05
+  marker_length: 0.10
 
 paths:
   calibration_images: "./database/calibration_images/*.png"

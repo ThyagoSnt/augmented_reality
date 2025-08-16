@@ -14,6 +14,42 @@ class ARMarker:
         self.parameters = cv2.aruco.DetectorParameters()
         self.detector = cv2.aruco.ArucoDetector(self.aruco_dict, self.parameters)
 
+    def rodrigues(self, rvec):
+        """
+        Manual implementation of Rodrigues' rotation formula.
+        Converts a 3D rotation vector into a 3x3 rotation matrix.
+
+        Returns:
+            R (np.ndarray): 3x3 rotation matrix
+            jacobian (None): Placeholder to match OpenCV's interface
+            rvec (np.ndarray): The original rotation vector (for compatibility)
+        """
+        rvec = rvec.flatten().astype(float)
+        theta = np.linalg.norm(rvec)
+
+        if theta < 1e-12:
+            # For very small angles, return identity
+            R = np.eye(3)
+        else:
+            # Normalized rotation axis
+            k = rvec / theta
+            kx, ky, kz = k
+
+            # Skew-symmetric cross-product matrix of k
+            K = np.array([
+                [0, -kz, ky],
+                [kz, 0, -kx],
+                [-ky, kx, 0]
+            ])
+
+            I = np.eye(3)
+            R = I * np.cos(theta) + (1 - np.cos(theta)) * np.outer(k, k) + np.sin(theta) * K
+
+        # Jacobian is not implemented (not needed for rendering)
+        jacobian = None
+
+        return R, jacobian, rvec
+
     def detect_markers(self, gray_frame):
         """Detect ArUco markers in a grayscale frame."""
         corners, ids, _ = self.detector.detectMarkers(gray_frame)
@@ -59,7 +95,7 @@ class ARMarker:
         ]
 
         # Rotation matrix
-        R, _ = cv2.Rodrigues(rvec)
+        R, _, _ = self.rodrigues(rvec)
 
         # Light direction
         light_dir = np.array([0.0, -1.0, -0.8], dtype=np.float32)
