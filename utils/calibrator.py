@@ -68,6 +68,45 @@ class CameraCalibrator:
         self.tvecs = tvecs
         return ret
 
+    import numpy as np
+
+    def l2_norm_manual(self, points1, points2):
+        """
+        Implements the L2 norm (Euclidean norm) manually, equivalent to cv2.norm(..., cv2.NORM_L2).
+        
+        This function is based on the concept of reprojection error as described in:
+        - Hartley & Zisserman, Multiple View Geometry in Computer Vision (2nd Edition),
+        Chapter 6: Camera Calibration and 3D Reconstruction, Section 6.3.1 (p. 312–314),
+        where the geometric error is defined as the Euclidean distance between observed image points
+        and reprojected points from the estimated camera model.
+
+        Args:
+            points1: np.ndarray of shape (N, 1, 2) or (N, 2)
+                    These are the observed 2D image points.
+            points2: np.ndarray of same shape as points1
+                    These are the reprojected 2D image points from the estimated model.
+
+        Returns:
+            float: L2 norm between the sets of points (total Euclidean error),
+                equivalent to: sqrt(Σ ||p_i - p̂_i||²)
+        """
+        # Remove extra dimension if present (OpenCV returns shape (N,1,2) from projectPoints)
+        p1 = np.squeeze(points1)
+        p2 = np.squeeze(points2)
+
+        # Difference between each point pair
+        diff = p1 - p2
+
+        # Compute squared Euclidean distances for each point
+        squared_dist = np.sum(diff ** 2, axis=-1)
+
+        # Sum of all squared distances (Σ ||p_i - p̂_i||²)
+        total = np.sum(squared_dist)
+
+        # Final L2 norm: √(Σ ||p_i - p̂_i||²)
+        return np.sqrt(total)
+
+
     def compute_reprojection_error(self):
         """Compute the mean reprojection error across all calibration images."""
         total_error = 0
@@ -76,7 +115,7 @@ class CameraCalibrator:
                 self.objpoints[i], self.rvecs[i], self.tvecs[i],
                 self.camera_matrix, self.dist_coeffs
             )
-            error = cv2.norm(self.imgpoints[i], imgpoints2, cv2.NORM_L2) / len(imgpoints2)
+            error = self.l2_norm_manual(self.imgpoints[i], imgpoints2) / len(imgpoints2)
             total_error += error
         self.reprojection_error = total_error / len(self.objpoints)
         return self.reprojection_error
