@@ -1,7 +1,8 @@
 import cv2
 import numpy as np
 import glob
-
+from scipy.linalg import rq
+from scipy.optimize import least_squares
 from utils.camera_math import CameraMathUtils
 
 class CameraCalibrator(CameraMathUtils):
@@ -60,18 +61,29 @@ class CameraCalibrator(CameraMathUtils):
             cv2.destroyAllWindows()
 
     def calibrate(self):
-        """Run camera calibration using detected points."""
-        ret, mtx, dist, rvecs, tvecs = cv2.calibrateCamera(
-            self.objpoints, self.imgpoints, self.image_size, None, None
+        """
+        Run camera calibration using manual implementation (DLT + distortion),
+        following Hartley & Zisserman's method.
+        """
+        ret, K, dist, rvecs, tvecs, reproj_err = self.calibrateCameraManual(
+            self.objpoints,
+            self.imgpoints,
+            self.image_size,
         )
-        self.camera_matrix = mtx
+
+        self.camera_matrix = K
         self.dist_coeffs = dist
         self.rvecs = rvecs
         self.tvecs = tvecs
+        self.reprojection_error = reproj_err
         return ret
 
+
     def compute_reprojection_error(self):
-        """Compute the mean reprojection error across all calibration images."""
+        """
+        Compute the mean reprojection error across all calibration images.
+        Reference: H&Z Sec. 6.3.1 – Geometric error (reprojection error).
+        """
         total_error = 0
         for i in range(len(self.objpoints)):
             imgpoints2, _ = self.project_points(
@@ -100,3 +112,6 @@ class CameraCalibrator(CameraMathUtils):
         self.dist_coeffs = data["dist_coeffs"]
         self.reprojection_error = data["reprojection_error"]
         print(f"Calibration data loaded from {input_path}")
+
+
+    
