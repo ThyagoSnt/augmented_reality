@@ -1,4 +1,6 @@
 import numpy as np
+from scipy.linalg import rq
+from scipy.optimize import least_squares
 
 
 class CameraMathUtils:
@@ -284,3 +286,164 @@ class CameraMathUtils:
         rvec = CameraMathUtils.rotation_matrix_to_rvec(R).reshape(3, 1)
         tvec = t.reshape(3, 1)
         return rvec, tvec
+
+    @staticmethod
+    def calibrateCameraManual(objectPoints, imagePoints, imageSize, flags=None, criteria=None):
+        """
+        Manual reimplementation of cv2.calibrateCamera, based on:
+        - H&Z Sec. 7.2 (pose from homography)
+        - H&Z Sec. 6.1–6.3 (projection + distortion)
+        - H&Z Sec. 4.1, 4.4 (DLT + normalization)
+
+        Returns (igual ao OpenCV):
+            ret, K, distCoeffs, rvecs, tvecs, reproj_err
+        """
+        # ---------------------------------------------------------------------
+        # 1. Compute homographies (HZ Sec. 4.1 + 4.4)
+        # ---------------------------------------------------------------------
+        Hs = []
+        for obj, img in zip(objectPoints, imagePoints):
+            assert np.allclose(obj[:, 2], 0), "Planar calibration requires Z=0!"
+            H = CameraMathUtils.homography_dlt(obj[:, :2], img)
+            Hs.append(H)
+
+        # ---------------------------------------------------------------------
+        # 2. Intrinsics from multiple homographies (HZ Sec. 7.2.2)
+        # ---------------------------------------------------------------------
+        V = []
+        for H in Hs:
+            h1, h2, _ = H[:, 0], H[:, 1], H[:, 2]
+            v12 = np.array([h1[0]*h2[0],
+                            h1[0]*h2[1] + h1[1]*h2[0],
+                            h1[1]*h2[1],
+                            h1[2]*h2[0] + h1[0]*h2[2],
+                            h1[2]*h2[1] + h1[1]*h2[2],
+                            h1[2]*h2[2]])
+            v11 = np.array([h1[0]**2,
+                            2*h1[0]*h1[1],
+                            h1[1]**2,
+                            2*h1[0]*h1[2],
+                            2*h1[1]*h1[2],
+                            h1[2]**2])
+            v22 = np.array([h2[0]**2,
+                            2*h2[0]*h2[1],
+                            h2[1]**2,
+                            2*h2[0]*h2[2],
+                            2*h2[1]*h2[2],
+                            h2[2]**2])
+            V.append(v12)
+            V.append(v11 - v22)
+        V = np.vstack(V)
+
+        _, _, Vt = np.linalg.svd(V)
+        b = Vt[-1]
+        B11, B12, B22, B13, B23, B33 = b
+
+        # H&Z eq. 7.7–7.8 (com abs() para estabilidade numérica)
+        v0 = (B12*B13 - B11*B23) / (B11*B22 - B12**2)
+        lam = B33 - (B13**2 + v0*(B12*B13 - B11*B23)) / B11
+        alpha = np.sqrt(abs(lam / B11))
+        beta  = np.sqrt(abs(lam * B11 / (B11*B22 - B12**2)))
+        gamma = -B12 * alpha**2 * beta / lam
+        u0 = gamma * v0 / beta - B13 * alpha**2 / lam
+
+        K = np.array([[alpha, gamma, u0],
+                    [0,     beta,  v0],
+                    [0,     0,     1]])
+
+        # ---------------------------------------------------------------------
+        # 3. Extrinsics for each image (HZ Sec. 7.2)
+        # ---------------------------------------------------------------------
+        rvecs, tvecs = [], []
+        for H in Hs:
+            R, t = CameraMathUtils.pose_from_homography(H, K)
+            rvecs.append(CameraMathUtils.rotation_matrix_to_rvec(R).reshape(3, 1))
+            tvecs.append(t.reshape(3, 1))
+
+        # ---------------------------------------------------------------------
+        # 4. Distortion estimation (HZ Sec. 6.3.1)
+        # ---------------------------------------------------------------------
+        A, bvec = [], []
+        for obj, img, rvec, tvec in zip(objectPoints, imagePoints, rvecs, tvecs):
+            proj, _ = CameraMathUtils.project_points(obj, rvec, tvec, K, np.zeros(5))
+            proj = proj.reshape(-1, 2)
+            img = img.reshape(-1, 2)
+
+            x = (proj[:, 0] - K[0, 2]) / K[0, 0]
+            y = (proj[:, 1] - K[1, 2]) / K[1, 1]
+            r2 = x*x + y*y
+
+            dx = img[:, 0] - proj[:, 0]
+            dy = img[:, 1] - proj[:, 1]
+
+            A.extend(np.column_stack([r2, r2**2, 2*x*y, r2 + 2*x*x, r2**3]))
+            bvec.extend(dx)
+            A.extend(np.column_stack([r2, r2**2, r2 + 2*y*y, 2*x*y, r2**3]))
+            bvec.extend(dy)
+
+        A = np.vstack(A)
+        bvec = np.array(bvec)
+        k, _, _, _ = np.linalg.lstsq(A, bvec, rcond=None)
+        distCoeffs = k.reshape(5, 1)
+
+         # ---------------------------------------------------------------------
+        # 5. Nonlinear refinement (full bundle adjustment, like OpenCV)
+        # ---------------------------------------------------------------------
+        w, h = imageSize
+        fx0, fy0 = K[0,0], K[1,1]
+        cx0, cy0 = K[0,2], K[1,2]
+        k_init = distCoeffs.ravel()
+
+        # empilha todos os parâmetros: intrínsecos + distorção + extrínsecos
+        params0 = [fx0, fy0, cx0, cy0] + list(k_init)
+        for rvec, tvec in zip(rvecs, tvecs):
+            params0.extend(rvec.ravel())
+            params0.extend(tvec.ravel())
+        params0 = np.array(params0)
+
+        def residual(params):
+            fx, fy, cx, cy = params[:4]
+            k1, k2, p1, p2, k3 = params[4:9]
+            K_ = np.array([[fx, 0, cx],
+                           [0, fy, cy],
+                           [0,  0,  1]])
+            d_ = np.array([k1, k2, p1, p2, k3])
+
+            errs = []
+            idx = 9
+            for obj, img in zip(objectPoints, imagePoints):
+                rvec = params[idx:idx+3]; idx += 3
+                tvec = params[idx:idx+3]; idx += 3
+                proj, _ = CameraMathUtils.project_points(obj, rvec, tvec, K_, d_)
+                errs.append((proj.reshape(-1,2) - img.reshape(-1,2)).ravel())
+            return np.hstack(errs)
+
+        res = least_squares(residual, params0, verbose=0, loss="soft_l1", f_scale=1.0)
+
+        # extrai parâmetros refinados
+        fx, fy, cx, cy = res.x[:4]
+        k1, k2, p1, p2, k3 = res.x[4:9]
+        K = np.array([[fx, 0, cx],
+                      [0, fy, cy],
+                      [0,  0,  1]])
+        distCoeffs = np.array([[k1, k2, p1, p2, k3]]).T
+
+        # extrínsecos refinados
+        rvecs, tvecs = [], []
+        idx = 9
+        for _ in objectPoints:
+            rvecs.append(res.x[idx:idx+3].reshape(3,1)); idx+=3
+            tvecs.append(res.x[idx:idx+3].reshape(3,1)); idx+=3
+
+        # ---------------------------------------------------------------------
+        # 6. Reprojection error (HZ 6.3.1)
+        # ---------------------------------------------------------------------
+        total_err, total_points = 0, 0
+        for obj, img, rvec, tvec in zip(objectPoints, imagePoints, rvecs, tvecs):
+            proj, _ = CameraMathUtils.project_points(obj, rvec, tvec, K, distCoeffs)
+            err = CameraMathUtils.l2_norm_manual(img, proj.reshape(-1, 2))**2
+            total_err += err
+            total_points += len(obj)
+        reproj_err = np.sqrt(total_err / total_points)
+
+        return True, K, distCoeffs, rvecs, tvecs, reproj_err
