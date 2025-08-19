@@ -104,14 +104,3 @@ class CameraCalibrator(CameraMathUtils):
             reprojection_error=self.reprojection_error
         )
         print(f"Calibration data saved to {output_path}")
-
-    def load(self, input_path="calibration_data.npz"):
-        """Load calibration results from a .npz file."""
-        data = np.load(input_path)
-        self.camera_matrix = data["camera_matrix"]
-        self.dist_coeffs = data["dist_coeffs"]
-        self.reprojection_error = data["reprojection_error"]
-        print(f"Calibration data loaded from {input_path}")
-
-
-    
