@@ -1,10 +1,11 @@
 import cv2
 import numpy as np
-
+import itertools
 from utils.camera_math import CameraMathUtils
 
+
 class ARMarker(CameraMathUtils):
-    def __init__(self, camera_params_path, marker_length):
+    def __init__(self, camera_params_path, marker_length, sphere_radius_px: int = 40, base_marker_id: int = 1):
         # Load camera intrinsic parameters
         data = np.load(camera_params_path)
         self.camera_matrix = data["camera_matrix"]
@@ -12,171 +13,192 @@ class ARMarker(CameraMathUtils):
 
         # ArUco setup
         self.marker_length = marker_length
+        self.base_marker_id = base_marker_id
         self.aruco_dict = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)
         self.parameters = cv2.aruco.DetectorParameters()
         self.detector = cv2.aruco.ArucoDetector(self.aruco_dict, self.parameters)
 
+        # Sphere radius (in pixels, fixed)
+        self.sphere_radius_px = sphere_radius_px
 
+        # Local 3D coordinates of the marker corners (used for pose/top extrusion)
+        # Order: top-left, top-right, bottom-right, bottom-left (OpenCV/ArUco convention)
+        self.marker_obj_points = np.array([
+            [-self.marker_length / 2,  self.marker_length / 2, 0],
+            [ self.marker_length / 2,  self.marker_length / 2, 0],
+            [ self.marker_length / 2, -self.marker_length / 2, 0],
+            [-self.marker_length / 2, -self.marker_length / 2, 0],
+        ], dtype=np.float32)
+
+    # -------------------------------------------------------------------------
+    # Marker detection and pose estimation
+    # -------------------------------------------------------------------------
     def detect_markers(self, gray_frame):
         """Detect ArUco markers in a grayscale frame."""
         corners, ids, _ = self.detector.detectMarkers(gray_frame)
         return corners, ids
 
     def estimate_pose(self, corners):
-        """Estimate pose of a single marker using solvePnP."""
-        obj_points = np.array([
-            [-self.marker_length/2,  self.marker_length/2, 0],
-            [ self.marker_length/2,  self.marker_length/2, 0],
-            [ self.marker_length/2, -self.marker_length/2, 0],
-            [-self.marker_length/2, -self.marker_length/2, 0],
-        ], dtype=np.float32)
-
+        """
+        Estimate pose (rvec, tvec) of a detected ArUco marker
+        using the known square geometry.
+        """
         img_points = corners.reshape(-1, 2)
-
-        rvec, tvec = self.solve_pnp(obj_points, img_points, self.camera_matrix)
+        rvec, tvec = self.solve_pnp(self.marker_obj_points, img_points, self.camera_matrix)
         return rvec, tvec
 
-
-    def draw_shaded_cuboid(self, frame, rvec, tvec, size_m=0.10,
-                        light_pos_cam=(0.0, 0.0, 0.0),
-                        light_dir_cam=None,
-                        ambient=0.18, kd=0.90, ks=0.35, shininess=32,
-                        apply_gamma=True):
+    # -------------------------------------------------------------------------
+    # Helpers
+    # -------------------------------------------------------------------------
+    def compute_bbox_points_local(self, height: float):
         """
-        Draw a shaded cuboid centered at the marker's origin, with fixed size.
-        Shading: Blinn–Phong (ambient + diffuse + specular), optional gamma correction.
-
-        Args:
-            size_m: edge length (meters) for width/height/depth (default 0.10 m).
-            light_pos_cam: point light position in camera coords (default: camera origin).
-            light_dir_cam: if not None, uses directional light (normalized) instead of point light.
-            ambient, kd, ks: ambient/diffuse/specular coefficients.
-            shininess: Blinn–Phong exponent.
-            apply_gamma: if True, converts linear color to sRGB with gamma≈2.2.
+        Build bbox in marker-local 3D coordinates.
+        Base = marker_obj_points (z=0), Top = z + height.
         """
-        w = h = d = float(size_m)
+        base_3d = self.marker_obj_points
+        top_3d = base_3d + np.array([0, 0, height], dtype=np.float32)
+        return np.vstack([base_3d, top_3d])
+    
+    def bbox_dimensions(self, bbox_points_3d_local):
+        """
+        Compute width (X), height (Z), depth (Y) of the bbox in marker-local coords.
+        Assumes bbox_points_3d_local is shape (8,3).
+        """
+        # Base = first 4 points (z=0 plane)
+        base = bbox_points_3d_local[:4]
 
-        # Cuboid vertices centered at origin in the marker's local coordinates
-        points_3d = np.float32([
-            [-w/2, -h/2, -d/2], [ w/2, -h/2, -d/2], [ w/2,  h/2, -d/2], [-w/2,  h/2, -d/2],  # near (z=-d/2)
-            [-w/2, -h/2,  d/2], [ w/2, -h/2,  d/2], [ w/2,  h/2,  d/2], [-w/2,  h/2,  d/2],  # far  (z=+d/2)
-        ])
+        # Width = distance between base[0] and base[1]
+        width = np.linalg.norm(base[0] - base[1])
+        # Depth = distance between base[1] and base[2]
+        depth = np.linalg.norm(base[1] - base[2])
+        # Height = distance between base[0] and bbox_points_3d_local[4] (top directly above)
+        height = np.linalg.norm(bbox_points_3d_local[0] - bbox_points_3d_local[4])
 
-        # Face indices (quads)
-        faces = [
-            [0, 1, 2, 3],  # near
-            [4, 5, 6, 7],  # far
-            [0, 1, 5, 4],  # bottom
-            [1, 2, 6, 5],  # right
-            [2, 3, 7, 6],  # top
-            [3, 0, 4, 7],  # left
-        ]
+        return width, depth, height
 
-        # Rotation matrix from rvec
-        R, _, _ = self.rodrigues(rvec)
-        t = tvec.reshape(3, 1)
+    def _best_matching_order(self, rvec, tvec, detected_corners_2d):
+        """
+        Find the permutation of detected base corners that best matches the
+        projection order of self.marker_obj_points. This ensures vertical
+        edges connect corresponding vertices.
+        """
+        proj_base2d, _ = self.project_points(
+            self.marker_obj_points, rvec, tvec, self.camera_matrix, self.dist_coeffs
+        )
+        proj_base2d = proj_base2d.reshape(-1, 2)
+        det = detected_corners_2d.reshape(-1, 2)
 
-        # Base color (BGR for OpenCV)
-        base_color_bgr = np.array([80, 160, 220], dtype=np.float32) / 255.0  # linear
+        best_perm = None
+        best_cost = float('inf')
+        for perm in itertools.permutations(range(4)):
+            cost = 0.0
+            for i in range(4):
+                cost += np.linalg.norm(det[perm[i]] - proj_base2d[i])
+            if cost < best_cost:
+                best_cost = cost
+                best_perm = perm
 
-        # Helper: linear -> sRGB gamma
-        def to_srgb(c):
-            if not apply_gamma:
-                return np.clip(c, 0.0, 1.0)
-            return np.clip(np.power(np.clip(c, 0.0, 1.0), 1.0 / 2.2), 0.0, 1.0)
+        ordered = det[list(best_perm)]
+        return ordered  # shape (4,2), ordered to align with marker_obj_points order
 
-        # Depth sort: draw far -> near using average camera-Z
-        face_depths = []
-        for face in faces:
-            pts_cam = (R @ points_3d[face].T).T + t.T  # (4,3)
-            avg_z = float(np.mean(pts_cam[:, 2]))
-            face_depths.append((avg_z, face))
-        face_depths.sort(key=lambda x: -x[0])  # far to near
+    # -------------------------------------------------------------------------
+    # Drawing functions
+    # -------------------------------------------------------------------------
+    def draw_bbox_aligned_to_detected_base(self, frame, rvec, tvec, base_corners_img2d, height):
+        """
+        Draw a bbox whose BASE is EXACTLY the detected ArUco corners (pixel-perfect),
+        with vertical edges and TOP computed from the marker pose and desired height.
+        """
+        # Ensure base corners are ordered to match the 3D object points
+        base2d_ordered = self._best_matching_order(rvec, tvec, base_corners_img2d)
 
-        # Project all points once
-        points_2d, _ = self.project_points(points_3d, rvec, tvec, self.camera_matrix, self.dist_coeffs)
-        points_2d = np.int32(points_2d).reshape(-1, 2)
+        # Compute and project TOP corners from local 3D points
+        bbox_points_3d_local = self.compute_bbox_points_local(height)
+        top3d = bbox_points_3d_local[4:]  # 4 top vertices
 
-        # Lighting setup
-        light_pos_cam = np.asarray(light_pos_cam, dtype=np.float32).reshape(3)
-        directional = (light_dir_cam is not None)
-        if directional:
-            Ldir = np.asarray(light_dir_cam, dtype=np.float32).reshape(3)
-            Ldir /= (np.linalg.norm(Ldir) + 1e-12)
+        top2d, _ = self.project_points(top3d, rvec, tvec, self.camera_matrix, self.dist_coeffs)
+        top2d = top2d.reshape(-1, 2)
 
-        for _, face in face_depths:
-            # Geometry in local
-            p0, p1, p2 = points_3d[face[0]], points_3d[face[1]], points_3d[face[2]]
-            v1 = p1 - p0
-            v2 = p2 - p0
-            n_local = np.cross(v1, v2)
-            n_local /= (np.linalg.norm(n_local) + 1e-12)
+        # Draw BASE using the EXACT detected corners (no reprojection) -> perfect alignment
+        base_poly = np.int32(base2d_ordered).reshape(-1, 1, 2)
+        cv2.polylines(frame, [base_poly], isClosed=True, color=(0, 255, 0), thickness=2)  # green
 
-            # Transform normal and center to camera coords
-            n_cam = R @ n_local
-            face_center_local = np.mean(points_3d[face], axis=0)
-            face_center_cam = (R @ face_center_local.reshape(3, 1) + t).reshape(3)
+        # Draw TOP (projected)
+        top_poly = np.int32(top2d).reshape(-1, 1, 2)
+        cv2.polylines(frame, [top_poly], isClosed=True, color=(255, 0, 0), thickness=2)  # blue
 
-            # View direction (camera at origin)
-            V = -face_center_cam
-            V /= (np.linalg.norm(V) + 1e-12)
+        # Draw VERTICAL EDGES: connect each base[i] (detected) -> top[i] (projected)
+        for i in range(4):
+            p_base = tuple(np.int32(base2d_ordered[i]))
+            p_top  = tuple(np.int32(top2d[i]))
+            cv2.line(frame, p_base, p_top, (0, 0, 255), 2)  # red
 
-            # Light direction
-            if directional:
-                L = Ldir
-            else:
-                L = light_pos_cam - face_center_cam
-                L /= (np.linalg.norm(L) + 1e-12)
+        return bbox_points_3d_local  # return local 3D for sphere center, if desired
 
-            # Blinn–Phong terms
-            ndotl = max(0.0, float(np.dot(n_cam, L)))
-            H = L + V
-            H /= (np.linalg.norm(H) + 1e-12)
-            ndoth = max(0.0, float(np.dot(n_cam, H)))
-            spec = (ndoth ** shininess)
+    def draw_metallic_sphere(self, frame, rvec, tvec, bbox_points_3d_local):
+        """Draw a metallic-looking sphere at the center of the given bbox."""
+        center_3d = np.mean(bbox_points_3d_local, axis=0).reshape(1, 3)
+        center_2d, _ = self.project_points(center_3d, rvec, tvec,
+                                           self.camera_matrix, self.dist_coeffs)
+        center_2d = tuple(map(int, center_2d.ravel()))
 
-            # Final color in linear space
-            color_linear = base_color_bgr * (ambient + kd * ndotl) + ks * spec
+        radius_px = self.sphere_radius_px
+        for r in range(radius_px, 0, -1):
+            intensity = int(200 * (1 - r / radius_px) + 55)
+            cv2.circle(frame, center_2d, r, (intensity, intensity, intensity), -1)
 
-            # Gamma to sRGB and to 8-bit
-            color_srgb = (to_srgb(color_linear) * 255.0).astype(np.uint8)
-            color_bgr = tuple(int(c) for c in color_srgb)  # BGR
-
-            # Rasterize
-            pts_2d_face = points_2d[face]
-            cv2.fillConvexPoly(frame, pts_2d_face, color_bgr)
-            cv2.polylines(frame, [pts_2d_face], True, (0, 0, 0), 1)
-
-
-
+    # -------------------------------------------------------------------------
+    # Main processing
+    # -------------------------------------------------------------------------
     def process_frame(self, frame):
         """
-        Detect markers 0 and 1. Draw a 10 cm cuboid:
-        - centered on marker 1 (orientation and XY from marker 1),
-        - placed at the Z height of marker 0 in camera coordinates.
+        Detect markers, and draw a bbox whose base is EXACTLY the detected
+        corners of ArUco index 0. Top and vertical edges come from the pose.
         """
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         corners, ids = self.detect_markers(gray)
 
-        if ids is not None and set([0, 1]).issubset(set(ids.flatten())):
+        if ids is not None:
+            ids_flat = ids.flatten()
+            id_set = set(ids_flat)
+
+            # draw detected markers (optional)
             cv2.aruco.drawDetectedMarkers(frame, corners, ids)
 
-            # Estimate poses
             rvecs, tvecs = {}, {}
-            for corner, marker_id in zip(corners, ids.flatten()):
+            marker_corners = {}
+            for corner, marker_id in zip(corners, ids_flat):
                 rvec, tvec = self.estimate_pose(corner)
                 rvecs[marker_id] = rvec
                 tvecs[marker_id] = tvec
+                marker_corners[marker_id] = corner
                 cv2.drawFrameAxes(frame, self.camera_matrix, self.dist_coeffs, rvec, tvec, 0.05)
 
-            # Orientation and XY center from marker 1
-            rvec_base = rvecs[1]
-            tvec_base = tvecs[1].copy()
+            # We require marker as the base
+            if self.base_marker_id in rvecs:
+                rvec_base = rvecs[self.base_marker_id]
+                tvec_base = tvecs[self.base_marker_id]
+                base_corners_img2d = marker_corners[self.base_marker_id]
 
-            # Match the camera-space Z ("height") to marker 0
-            tvec_base[2, 0] = tvecs[0][2, 0]  # align height (camera Z)
+                # Height choice:
+                # If marker 1 exists, use vertical distance between 0 and 1; else, fallback.
+                if 1 in tvecs:
+                    rel_pos = tvecs[0] - tvecs[1]
+                    y_rel = float(rel_pos[1, 0])
+                    bbox_height = abs(y_rel)
+                else:
+                    bbox_height = float(self.marker_length * 0.5)  # fallback height
 
-            # Draw fixed-size cuboid 0.10 m (10 cm) per edge
-            self.draw_shaded_cuboid(frame, rvec_base, tvec_base, size_m=0.10)
+                # Draw BBOX aligned to detected base corners
+                bbox_points_3d_local = self.draw_bbox_aligned_to_detected_base(
+                    frame, rvec_base, tvec_base, base_corners_img2d, bbox_height
+                )
+
+                # Draw metallic sphere centered inside this bbox
+                self.draw_metallic_sphere(frame, rvec_base, tvec_base, bbox_points_3d_local)
+
+                # Compute bbox dimensions
+                w, d, h = self.bbox_dimensions(bbox_points_3d_local)
+                print(f"BBox dimensions -> Width (X): {w:.3f} m, Depth (Y): {d:.3f} m, Height (Z): {h:.3f} m")
 
         return frame
