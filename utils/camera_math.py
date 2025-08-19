@@ -339,7 +339,6 @@ class CameraMathUtils:
         b = Vt[-1]
         B11, B12, B22, B13, B23, B33 = b
 
-        # H&Z eq. 7.7–7.8 (com abs() para estabilidade numérica)
         v0 = (B12*B13 - B11*B23) / (B11*B22 - B12**2)
         lam = B33 - (B13**2 + v0*(B12*B13 - B11*B23)) / B11
         alpha = np.sqrt(abs(lam / B11))
@@ -386,7 +385,7 @@ class CameraMathUtils:
         k, _, _, _ = np.linalg.lstsq(A, bvec, rcond=None)
         distCoeffs = k.reshape(5, 1)
 
-         # ---------------------------------------------------------------------
+        # ---------------------------------------------------------------------
         # 5. Nonlinear refinement (full bundle adjustment, like OpenCV)
         # ---------------------------------------------------------------------
         w, h = imageSize
@@ -394,7 +393,6 @@ class CameraMathUtils:
         cx0, cy0 = K[0,2], K[1,2]
         k_init = distCoeffs.ravel()
 
-        # empilha todos os parâmetros: intrínsecos + distorção + extrínsecos
         params0 = [fx0, fy0, cx0, cy0] + list(k_init)
         for rvec, tvec in zip(rvecs, tvecs):
             params0.extend(rvec.ravel())
@@ -420,7 +418,6 @@ class CameraMathUtils:
 
         res = least_squares(residual, params0, verbose=0, loss="soft_l1", f_scale=1.0)
 
-        # extrai parâmetros refinados
         fx, fy, cx, cy = res.x[:4]
         k1, k2, p1, p2, k3 = res.x[4:9]
         K = np.array([[fx, 0, cx],
@@ -428,7 +425,6 @@ class CameraMathUtils:
                       [0,  0,  1]])
         distCoeffs = np.array([[k1, k2, p1, p2, k3]]).T
 
-        # extrínsecos refinados
         rvecs, tvecs = [], []
         idx = 9
         for _ in objectPoints:
