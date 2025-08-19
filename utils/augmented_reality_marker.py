@@ -1,10 +1,11 @@
 import cv2
 import numpy as np
+import itertools
 from utils.camera_math import CameraMathUtils
 
 
 class ARMarker(CameraMathUtils):
-    def __init__(self, camera_params_path, marker_length):
+    def __init__(self, camera_params_path, marker_length, sphere_radius_px: int = 40, base_marker_id: int = 1):
         # Load camera intrinsic parameters
         data = np.load(camera_params_path)
         self.camera_matrix = data["camera_matrix"]
@@ -12,9 +13,22 @@ class ARMarker(CameraMathUtils):
 
         # ArUco setup
         self.marker_length = marker_length
+        self.base_marker_id = base_marker_id
         self.aruco_dict = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)
         self.parameters = cv2.aruco.DetectorParameters()
         self.detector = cv2.aruco.ArucoDetector(self.aruco_dict, self.parameters)
+
+        # Sphere radius (in pixels, fixed)
+        self.sphere_radius_px = sphere_radius_px
+
+        # Local 3D coordinates of the marker corners (used for pose/top extrusion)
+        # Order: top-left, top-right, bottom-right, bottom-left (OpenCV/ArUco convention)
+        self.marker_obj_points = np.array([
+            [-self.marker_length / 2,  self.marker_length / 2, 0],
+            [ self.marker_length / 2,  self.marker_length / 2, 0],
+            [ self.marker_length / 2, -self.marker_length / 2, 0],
+            [-self.marker_length / 2, -self.marker_length / 2, 0],
+        ], dtype=np.float32)
 
     # -------------------------------------------------------------------------
     # Marker detection and pose estimation
@@ -29,69 +43,106 @@ class ARMarker(CameraMathUtils):
         Estimate pose (rvec, tvec) of a detected ArUco marker
         using the known square geometry.
         """
-        obj_points = np.array([
-            [-self.marker_length / 2,  self.marker_length / 2, 0],
-            [ self.marker_length / 2,  self.marker_length / 2, 0],
-            [ self.marker_length / 2, -self.marker_length / 2, 0],
-            [-self.marker_length / 2, -self.marker_length / 2, 0],
-        ], dtype=np.float32)
-
         img_points = corners.reshape(-1, 2)
-        rvec, tvec = self.solve_pnp(obj_points, img_points, self.camera_matrix)
+        rvec, tvec = self.solve_pnp(self.marker_obj_points, img_points, self.camera_matrix)
         return rvec, tvec
+
+    # -------------------------------------------------------------------------
+    # Helpers
+    # -------------------------------------------------------------------------
+    def compute_bbox_points_local(self, height: float):
+        """
+        Build bbox in marker-local 3D coordinates.
+        Base = marker_obj_points (z=0), Top = z + height.
+        """
+        base_3d = self.marker_obj_points
+        top_3d = base_3d + np.array([0, 0, height], dtype=np.float32)
+        return np.vstack([base_3d, top_3d])
+    
+    def bbox_dimensions(self, bbox_points_3d_local):
+        """
+        Compute width (X), height (Z), depth (Y) of the bbox in marker-local coords.
+        Assumes bbox_points_3d_local is shape (8,3).
+        """
+        # Base = first 4 points (z=0 plane)
+        base = bbox_points_3d_local[:4]
+
+        # Width = distance between base[0] and base[1]
+        width = np.linalg.norm(base[0] - base[1])
+        # Depth = distance between base[1] and base[2]
+        depth = np.linalg.norm(base[1] - base[2])
+        # Height = distance between base[0] and bbox_points_3d_local[4] (top directly above)
+        height = np.linalg.norm(bbox_points_3d_local[0] - bbox_points_3d_local[4])
+
+        return width, depth, height
+
+    def _best_matching_order(self, rvec, tvec, detected_corners_2d):
+        """
+        Find the permutation of detected base corners that best matches the
+        projection order of self.marker_obj_points. This ensures vertical
+        edges connect corresponding vertices.
+        """
+        proj_base2d, _ = self.project_points(
+            self.marker_obj_points, rvec, tvec, self.camera_matrix, self.dist_coeffs
+        )
+        proj_base2d = proj_base2d.reshape(-1, 2)
+        det = detected_corners_2d.reshape(-1, 2)
+
+        best_perm = None
+        best_cost = float('inf')
+        for perm in itertools.permutations(range(4)):
+            cost = 0.0
+            for i in range(4):
+                cost += np.linalg.norm(det[perm[i]] - proj_base2d[i])
+            if cost < best_cost:
+                best_cost = cost
+                best_perm = perm
+
+        ordered = det[list(best_perm)]
+        return ordered  # shape (4,2), ordered to align with marker_obj_points order
 
     # -------------------------------------------------------------------------
     # Drawing functions
     # -------------------------------------------------------------------------
-    def draw_bbox_from_marker(self, frame, rvec, tvec, marker_length, height=0.10):
+    def draw_bbox_aligned_to_detected_base(self, frame, rvec, tvec, base_corners_img2d, height):
         """
-        Draw a 3D bounding box with the ArUco marker as its base.
+        Draw a bbox whose BASE is EXACTLY the detected ArUco corners (pixel-perfect),
+        with vertical edges and TOP computed from the marker pose and desired height.
         """
-        # Define base vertices in the marker's local coordinate system
-        base_vertices = np.float32([
-            [-marker_length / 2,  marker_length / 2, 0],
-            [ marker_length / 2,  marker_length / 2, 0],
-            [ marker_length / 2, -marker_length / 2, 0],
-            [-marker_length / 2, -marker_length / 2, 0],
-        ])
+        # Ensure base corners are ordered to match the 3D object points
+        base2d_ordered = self._best_matching_order(rvec, tvec, base_corners_img2d)
 
-        # Top vertices extruded along +Z in marker's local frame
-        top_vertices = base_vertices + np.array([0, 0, height], dtype=np.float32)
+        # Compute and project TOP corners from local 3D points
+        bbox_points_3d_local = self.compute_bbox_points_local(height)
+        top3d = bbox_points_3d_local[4:]  # 4 top vertices
 
-        # Combine into 8 vertices (base + top)
-        points_3d = np.vstack([base_vertices, top_vertices])
+        top2d, _ = self.project_points(top3d, rvec, tvec, self.camera_matrix, self.dist_coeffs)
+        top2d = top2d.reshape(-1, 2)
 
-        # Project into image
-        points_2d, _ = self.project_points(points_3d, rvec, tvec, self.camera_matrix, self.dist_coeffs)
-        points_2d = np.int32(points_2d).reshape(-1, 2)
+        # Draw BASE using the EXACT detected corners (no reprojection) -> perfect alignment
+        base_poly = np.int32(base2d_ordered).reshape(-1, 1, 2)
+        cv2.polylines(frame, [base_poly], isClosed=True, color=(0, 255, 0), thickness=2)  # green
 
-        # Draw base (green)
-        cv2.polylines(frame, [points_2d[:4]], isClosed=True, color=(0, 255, 0), thickness=2)
-        # Draw top (blue)
-        cv2.polylines(frame, [points_2d[4:]], isClosed=True, color=(255, 0, 0), thickness=2)
-        # Draw vertical edges (red)
+        # Draw TOP (projected)
+        top_poly = np.int32(top2d).reshape(-1, 1, 2)
+        cv2.polylines(frame, [top_poly], isClosed=True, color=(255, 0, 0), thickness=2)  # blue
+
+        # Draw VERTICAL EDGES: connect each base[i] (detected) -> top[i] (projected)
         for i in range(4):
-            cv2.line(frame, tuple(points_2d[i]), tuple(points_2d[i+4]), (0, 0, 255), 2)
+            p_base = tuple(np.int32(base2d_ordered[i]))
+            p_top  = tuple(np.int32(top2d[i]))
+            cv2.line(frame, p_base, p_top, (0, 0, 255), 2)  # red
 
-        return points_3d  # return 3D vertices so we can use the center later
+        return bbox_points_3d_local  # return local 3D for sphere center, if desired
 
-    def draw_metallic_sphere(self, frame, rvec, tvec, bbox_points_3d):
-        """
-        Draw a metallic-looking sphere at the center of the given bbox.
-        """
-        # Compute center of bbox in 3D (average of vertices)
-        center_3d = np.mean(bbox_points_3d, axis=0).reshape(1, 3)
-
-        # Project center
-        center_2d, _ = self.project_points(center_3d, rvec, tvec, self.camera_matrix, self.dist_coeffs)
+    def draw_metallic_sphere(self, frame, rvec, tvec, bbox_points_3d_local):
+        """Draw a metallic-looking sphere at the center of the given bbox."""
+        center_3d = np.mean(bbox_points_3d_local, axis=0).reshape(1, 3)
+        center_2d, _ = self.project_points(center_3d, rvec, tvec,
+                                           self.camera_matrix, self.dist_coeffs)
         center_2d = tuple(map(int, center_2d.ravel()))
 
-        # Estimate pixel radius (relative to bbox size)
-        corner_3d = bbox_points_3d[0].reshape(1, 3)
-        corner_2d, _ = self.project_points(corner_3d, rvec, tvec, self.camera_matrix, self.dist_coeffs)
-        radius_px = int(np.linalg.norm(center_2d - corner_2d.ravel()))
-
-        # Radial gradient fill
+        radius_px = self.sphere_radius_px
         for r in range(radius_px, 0, -1):
             intensity = int(200 * (1 - r / radius_px) + 55)
             cv2.circle(frame, center_2d, r, (intensity, intensity, intensity), -1)
@@ -100,39 +151,54 @@ class ARMarker(CameraMathUtils):
     # Main processing
     # -------------------------------------------------------------------------
     def process_frame(self, frame):
-        """Process one frame: detect markers, draw axes, sphere, and cube."""
+        """
+        Detect markers, and draw a bbox whose base is EXACTLY the detected
+        corners of ArUco index 0. Top and vertical edges come from the pose.
+        """
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         corners, ids = self.detect_markers(gray)
 
-        if ids is not None and set([0, 1]).issubset(set(ids.flatten())):
+        if ids is not None:
+            ids_flat = ids.flatten()
+            id_set = set(ids_flat)
+
+            # draw detected markers (optional)
             cv2.aruco.drawDetectedMarkers(frame, corners, ids)
 
             rvecs, tvecs = {}, {}
-            for corner, marker_id in zip(corners, ids.flatten()):
+            marker_corners = {}
+            for corner, marker_id in zip(corners, ids_flat):
                 rvec, tvec = self.estimate_pose(corner)
                 rvecs[marker_id] = rvec
                 tvecs[marker_id] = tvec
-                cv2.drawFrameAxes(frame, self.camera_matrix, self.dist_coeffs,
-                                rvec, tvec, 0.05)
+                marker_corners[marker_id] = corner
+                cv2.drawFrameAxes(frame, self.camera_matrix, self.dist_coeffs, rvec, tvec, 0.05)
 
-            # Marker 1 gives orientation and XY
-            rvec_base = rvecs[1]
-            tvec_base = tvecs[1].copy()
+            # We require marker as the base
+            if self.base_marker_id in rvecs:
+                rvec_base = rvecs[self.base_marker_id]
+                tvec_base = tvecs[self.base_marker_id]
+                base_corners_img2d = marker_corners[self.base_marker_id]
 
-            # Z comes from marker 0
-            tvec_base[2, 0] = tvecs[0][2, 0]
+                # Height choice:
+                # If marker 1 exists, use vertical distance between 0 and 1; else, fallback.
+                if 1 in tvecs:
+                    rel_pos = tvecs[0] - tvecs[1]
+                    y_rel = float(rel_pos[1, 0])
+                    bbox_height = abs(y_rel)
+                else:
+                    bbox_height = float(self.marker_length * 0.5)  # fallback height
 
-            # Get corners of marker 1 (base)
-            idx_marker1 = np.where(ids.flatten() == 1)[0][0]
-            base_corners = corners[idx_marker1]
+                # Draw BBOX aligned to detected base corners
+                bbox_points_3d_local = self.draw_bbox_aligned_to_detected_base(
+                    frame, rvec_base, tvec_base, base_corners_img2d, bbox_height
+                )
 
-            # 1) Compute bbox points first
-            bbox_points_3d = self.draw_bbox_from_marker(
-                frame, rvec_base, tvec_base, self.marker_length, height=0.10
-            )
+                # Draw metallic sphere centered inside this bbox
+                self.draw_metallic_sphere(frame, rvec_base, tvec_base, bbox_points_3d_local)
 
-            # 2) Draw the metallic sphere BEFORE re-drawing bbox
-            # (so bbox will be drawn over it)
-            self.draw_metallic_sphere(frame, rvec_base, tvec_base, bbox_points_3d)
+                # Compute bbox dimensions
+                w, d, h = self.bbox_dimensions(bbox_points_3d_local)
+                print(f"BBox dimensions -> Width (X): {w:.3f} m, Depth (Y): {d:.3f} m, Height (Z): {h:.3f} m")
 
         return frame
