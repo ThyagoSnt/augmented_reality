@@ -7,7 +7,7 @@ from utils.camera_math import CameraMathUtils
 
 class ARMarker(CameraMathUtils):
     def __init__(self, camera_params_path, marker_length, base_marker_id: int = 1,
-                 model_path="database/models/16433_Pig.obj"):
+                 model_path="database/models/head.obj"):
         
         # Load camera intrinsic parameters
         data = np.load(camera_params_path)
@@ -106,7 +106,7 @@ class ARMarker(CameraMathUtils):
         face_order = np.argsort(z_means)[::-1]
 
         # Metallic pink, normalized
-        base_color = np.array([203, 192, 255], dtype=np.float32) / 255.0
+        base_color = np.array([220, 255, 210], dtype=np.float32) / 255.0  
 
         # Phong parameters
         ka, kd, ks = 0.3, 0.7, 0.8
