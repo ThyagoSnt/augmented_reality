@@ -17,9 +17,6 @@ class CameraMathUtils:
         """
         Rodrigues' rotation formula (vector -> rotation matrix).
         Returns (R, None, rvec) to stay compatible with OpenCV-like signature.
-
-        Reference:
-        - H&Z, Appendix A: Exponential map for SO(3).
         """
         rvec = np.asarray(rvec, dtype=float).reshape(3)
         theta = np.linalg.norm(rvec)
@@ -43,9 +40,6 @@ class CameraMathUtils:
     def rotation_matrix_to_rvec(R: np.ndarray) -> np.ndarray:
         """
         Inverse Rodrigues: rotation matrix -> rotation vector.
-
-        Reference:
-        - H&Z, Appendix A; also classic SO(3) logarithm map.
         """
         R = np.asarray(R, dtype=float).reshape(3, 3)
         tr = float(np.trace(R))
@@ -82,9 +76,6 @@ class CameraMathUtils:
     def l2_norm_manual(points1: np.ndarray, points2: np.ndarray) -> float:
         """
         Manual L2 norm equivalent to cv2.norm(..., NORM_L2) over full arrays.
-
-        H&Z 6.3.1: geometric error as Euclidean distance between observed
-        and reprojected image points.
         """
         p1 = np.squeeze(points1)
         p2 = np.squeeze(points2)
@@ -106,9 +97,6 @@ class CameraMathUtils:
         Manual version of cv2.projectPoints with optional numerical Jacobian.
 
         Distortion model: (k1, k2, p1, p2, k3).
-
-        References:
-        - H&Z 6.1–6.3 (pinhole projection and distortion models).
         """
         def _parse_distortion(d: np.ndarray):
             d = np.asarray(d, dtype=float).reshape(-1)
@@ -180,7 +168,7 @@ class CameraMathUtils:
     @staticmethod
     def normalize_points_2d(pts: np.ndarray):
         """
-        Hartley normalization (H&Z Sec. 4.4): translate to centroid and scale
+        Translate to centroid and scale
         so mean distance to the origin equals sqrt(2).
         Returns normalized homogeneous points (N,3) and the normalization matrix T (3,3).
         """
@@ -200,8 +188,6 @@ class CameraMathUtils:
         """
         Direct Linear Transform for planar homography with normalization.
         XY: (N,2) plane points; uv: (N,2) image points. N >= 4.
-
-        Reference: H&Z Sec. 4.1 and 4.4.
         """
         XYn, T1 = CameraMathUtils.normalize_points_2d(XY)
         uvn, T2 = CameraMathUtils.normalize_points_2d(uv)
@@ -225,8 +211,6 @@ class CameraMathUtils:
         Recover pose [R|t] from homography with known intrinsics K.
 
         K^{-1} H = [λ r1 | λ r2 | λ t], enforce orthonormality via SVD.
-
-        Reference: H&Z Sec. 7.2 (pose from calibrated homography).
         """
         K = np.asarray(K, dtype=float).reshape(3, 3)
         Kinv = np.linalg.inv(K)
@@ -254,7 +238,7 @@ class CameraMathUtils:
                   img_points: np.ndarray,
                   camera_matrix: np.ndarray):
         """
-        Planar PnP via homography (DLT + Hartley normalization) with known intrinsics.
+        Planar PnP via homography with known intrinsics.
 
         Args:
             obj_points: (N,3) object points on the marker plane (Z=0).
@@ -264,10 +248,6 @@ class CameraMathUtils:
         Returns:
             rvec: (3,1) Rodrigues rotation vector.
             tvec: (3,1) translation vector.
-
-        References:
-        - H&Z Sec. 4.1 (plane-induced homography), Sec. 4.4 (normalization),
-          Sec. 7.2 (pose from calibrated homography).
         """
         obj_points = np.asarray(obj_points, dtype=float).reshape(-1, 3)
         img_points = np.asarray(img_points, dtype=float).reshape(-1, 2)
@@ -290,10 +270,7 @@ class CameraMathUtils:
     @staticmethod
     def calibrateCameraManual(objectPoints, imagePoints, imageSize, flags=None, criteria=None):
         """
-        Manual reimplementation of cv2.calibrateCamera, based on:
-        - H&Z Sec. 7.2 (pose from homography)
-        - H&Z Sec. 6.1–6.3 (projection + distortion)
-        - H&Z Sec. 4.1, 4.4 (DLT + normalization)
+        Manual reimplementation of cv2.calibrateCamera
 
         Returns (igual ao OpenCV):
             ret, K, distCoeffs, rvecs, tvecs, reproj_err
