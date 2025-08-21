@@ -83,28 +83,74 @@ class ARMarker(CameraMathUtils):
         return bbox_points_3d_local
 
     # -------------------------------------------------------------------------
-    def draw_obj(self, frame, rvec, tvec):
+    def draw_obj(self, frame, rvec, tvec, lights=None):
         vertices = np.asarray(self.mesh.vertices, dtype=np.float32)
         faces = np.asarray(self.mesh.faces, dtype=np.int32)
 
-        projected, _ = cv2.projectPoints(vertices, rvec, tvec,
-                                        self.camera_matrix, self.dist_coeffs)
+        projected, _ = self.project_points(vertices, rvec, tvec,self.camera_matrix, self.dist_coeffs)
         projected = projected.reshape(-1, 2)
 
-        # Pintaremos sempre de rosa (BGR)
-        color = tuple(int(c) for c in self.fixed_color)
-
-        # Z médio por face para painter's algorithm (longe -> perto)
-        R, _ = cv2.Rodrigues(rvec)
+        # Rvec to matrix
+        R, _, _ = self.rodrigues(rvec)
         verts_cam = (R @ vertices.T + tvec).T
+
+        # Faces normals
+        face_normals = np.cross(
+            verts_cam[faces[:, 1]] - verts_cam[faces[:, 0]],
+            verts_cam[faces[:, 2]] - verts_cam[faces[:, 0]]
+        )
+        face_normals /= np.linalg.norm(face_normals, axis=1)[:, None]
+
+        # Painter's Algorithm
         z_means = np.mean(verts_cam[faces, 2], axis=1)
         face_order = np.argsort(z_means)[::-1]
 
+        # Metallic pink, normalized
+        base_color = np.array([203, 192, 255], dtype=np.float32) / 255.0
+
+        # Phong parameters
+        ka, kd, ks = 0.3, 0.7, 0.8
+        shininess = 32
+        view_dir = np.array([0, 0, 1], dtype=np.float32)
+
+        # Lights in the camera space
+        if lights is None:
+            lights = [
+                np.array([0, 0, 1.0]),
+                np.array([1.0, 1.0, 1.0]),
+                np.array([-1.0, 0.5, 0.7])
+            ]
+
+        # Light norm
+        lights = [l / np.linalg.norm(l) for l in lights]
+
         for fi in face_order:
             tri = projected[faces[fi]].round().astype(np.int32).reshape(-1, 1, 2)
-            # Triângulo é convexo → fillConvexPoly é ótimo aqui
+
+            n = face_normals[fi]
+            if n[2] > 0:
+                continue
+
+            # Coef ambient
+            intensity = ka
+            for light in lights:
+
+                # Coef diff
+                diff = max(np.dot(n, light), 0.0)
+
+                # Coef espec
+                reflect = 2 * n * np.dot(n, light) - light
+                spec = max(np.dot(reflect, view_dir), 0.0) ** shininess
+
+                intensity += kd * diff + ks * spec
+
+            intensity = np.clip(intensity, 0, 1)
+
+            # Final color
+            color = (base_color * intensity * 255).astype(np.uint8)
+            color = tuple(int(c) for c in color)
+
             cv2.fillConvexPoly(frame, tri, color)
-            # ❌ NÃO desenhar contorno preto de cada triângulo
 
 
     # -------------------------------------------------------------------------
@@ -132,7 +178,7 @@ class ARMarker(CameraMathUtils):
 
                 if 0 in tvecs:
                     rel_pos = tvec_base - tvecs[0]
-                    bbox_height = abs(float(rel_pos[1, 0]))  # eixo Y na câmera
+                    bbox_height = abs(float(rel_pos[1, 0]))
                 else:
                     bbox_height = float(self.marker_length * 0.5)
 
